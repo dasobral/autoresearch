@@ -34,10 +34,10 @@ Each experiment runs on a single GPU. The training script runs for a **fixed tim
 
 **VRAM** is a hard constraint on this machine. This GPU has **10 GB VRAM**. Do not exceed it. Hard limits to respect at all times:
 
-- `DEVICE_BATCH_SIZE` must stay at `_default_device_batch_size` (auto-detected to 16). Do **not** override it with a literal value.
-- `DEPTH` must stay in the range **4–8**. Values above 8 produce models too large for the available VRAM and step budget.
-- `TOTAL_BATCH_SIZE` must remain a power of 2 and satisfy `TOTAL_BATCH_SIZE % (DEVICE_BATCH_SIZE * MAX_SEQ_LEN) == 0`. Reasonable range: `2**15` to `2**18`.
-- `ASPECT_RATIO` must stay in the range **32–96**. Higher values rapidly increase model_dim and VRAM usage.
+- `DEVICE_BATCH_SIZE` must stay at `_default_device_batch_size` (auto-detected to **8** on this machine, because GPU VRAM is 9.6 GB which falls below the 10 GB threshold). Do **not** override it with a literal value.
+- `DEPTH` must stay in the range **4–12**. The baseline at DEPTH=6 uses only ~2 GB VRAM, so there is headroom to go deeper.
+- `TOTAL_BATCH_SIZE` must remain a power of 2 and satisfy `TOTAL_BATCH_SIZE % (DEVICE_BATCH_SIZE * MAX_SEQ_LEN) == 0`. With DEVICE_BATCH_SIZE=8 and MAX_SEQ_LEN=2048, valid values are multiples of 16384 (i.e. `2**14`, `2**15`, `2**16`, `2**17`, `2**18`).
+- `ASPECT_RATIO` must stay in the range **32–128**. The baseline at 64 uses only ~2 GB VRAM, so larger values are worth exploring.
 
 If a run crashes with a CUDA out-of-memory error, that configuration is too large — log it as `crash`, revert, and move to a smaller or different change.
 
