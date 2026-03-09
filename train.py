@@ -490,7 +490,7 @@ HEAD_DIM = 128          # target head dimension for attention
 WINDOW_PATTERN = "SSSL" # sliding window pattern: L=full, S=half context
 
 # Optimization
-TOTAL_BATCH_SIZE = 2**19 # ~524K tokens per optimizer step
+TOTAL_BATCH_SIZE = 2**17 # ~131K tokens per optimizer step (2**19 on H100; reduced for RTX 3080 to get ~390 steps/run)
 EMBEDDING_LR = 0.6      # learning rate for token embeddings (Adam)
 UNEMBEDDING_LR = 0.004  # learning rate for lm_head (Adam)
 MATRIX_LR = 0.04        # learning rate for matrix parameters (Muon)
@@ -502,7 +502,7 @@ WARMDOWN_RATIO = 0.5    # fraction of time budget for LR warmdown
 FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
 
 # Model size
-DEPTH = 8               # number of transformer layers
+DEPTH = 6               # number of transformer layers (8 on H100; 6 on RTX 3080 → model_dim=384, ~11M params)
 DEVICE_BATCH_SIZE = _default_device_batch_size  # auto-scaled to GPU VRAM; override here if needed
 
 # ---------------------------------------------------------------------------
