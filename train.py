@@ -22,6 +22,60 @@ cap = torch.cuda.get_device_capability()
 repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
 fa3 = get_kernel(repo).flash_attn_interface
 
+# ---------------------------------------------------------------------------
+# GPU probe — runs once at import time, sets globals used throughout the file
+# ---------------------------------------------------------------------------
+
+GPU_NAME = torch.cuda.get_device_name(0)
+GPU_VRAM_GB = torch.cuda.get_device_properties(0).total_memory / 1024**3
+
+# BF16 Tensor Core support: A100 (sm_80), Ada/RTX40xx (sm_89), Hopper (sm_90),
+# and consumer Ampere (sm_86/87). torch.cuda.is_bf16_supported() covers all of these.
+COMPUTE_DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+
+# Dense (non-sparse) BF16/FP16 Tensor Core peak TFLOPS per GPU family.
+# Used for MFU reporting; longest-prefix match against the device name string.
+_PEAK_FLOPS_TABLE = [
+    ("H100 SXM",       989.5e12),
+    ("H100 PCIe",      835e12),
+    ("H100",           989.5e12),
+    ("H800",           989.5e12),
+    ("A100 SXM",       312e12),
+    ("A100",           312e12),
+    ("A800",           312e12),
+    ("RTX 4090",       165e12),
+    ("RTX 4080 SUPER", 118e12),
+    ("RTX 4080",        97.5e12),
+    ("RTX 4070 Ti SUPER", 90e12),
+    ("RTX 4070 Ti",     80e12),
+    ("RTX 4070 SUPER",  71e12),
+    ("RTX 4070",        55.5e12),
+    ("RTX 4060 Ti",     44.5e12),
+    ("RTX 4060",        30e12),
+    ("RTX 3090 Ti",     80e12),
+    ("RTX 3090",        71e12),
+    ("RTX 3080 Ti",     64e12),
+    ("RTX 3080",        45e12),
+    ("RTX 3070 Ti",     43e12),
+    ("RTX 3070",        40e12),
+    ("RTX 3060 Ti",     32e12),
+    ("RTX 3060",        24.5e12),
+]
+GPU_PEAK_FLOPS = next((v for k, v in _PEAK_FLOPS_TABLE if k in GPU_NAME), 989.5e12)
+
+# Safe DEVICE_BATCH_SIZE default scaled to available VRAM.
+# Leaves headroom for the agent to increase model depth/width without immediate OOM.
+if GPU_VRAM_GB >= 70:
+    _default_device_batch_size = 128
+elif GPU_VRAM_GB >= 35:
+    _default_device_batch_size = 64
+elif GPU_VRAM_GB >= 18:
+    _default_device_batch_size = 32
+elif GPU_VRAM_GB >= 10:
+    _default_device_batch_size = 16
+else:
+    _default_device_batch_size = 8
+
 from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
 
 # ---------------------------------------------------------------------------
@@ -174,10 +228,10 @@ class GPT(nn.Module):
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
         self.cos, self.sin = cos, sin
-        # Cast embeddings to bf16
-        self.transformer.wte.to(dtype=torch.bfloat16)
+        # Cast embeddings to compute dtype (bf16 on Hopper/Ada/A100, fp16 on older)
+        self.transformer.wte.to(dtype=COMPUTE_DTYPE)
         for ve in self.value_embeds.values():
-            ve.to(dtype=torch.bfloat16)
+            ve.to(dtype=COMPUTE_DTYPE)
 
     def _precompute_rotary_embeddings(self, seq_len, head_dim, base=10000, device=None):
         if device is None:
@@ -187,7 +241,7 @@ class GPT(nn.Module):
         t = torch.arange(seq_len, dtype=torch.float32, device=device)
         freqs = torch.outer(t, inv_freq)
         cos, sin = freqs.cos(), freqs.sin()
-        cos, sin = cos.bfloat16(), sin.bfloat16()
+        cos, sin = cos.to(COMPUTE_DTYPE), sin.to(COMPUTE_DTYPE)
         cos, sin = cos[None, :, None, :], sin[None, :, None, :]
         return cos, sin
 
@@ -320,7 +374,7 @@ def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momen
     momentum_buffer.lerp_(stacked_grads, 1 - momentum)
     g = stacked_grads.lerp_(momentum_buffer, momentum)
     # Polar express orthogonalization
-    X = g.bfloat16()
+    X = g.to(COMPUTE_DTYPE)
     X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.02 + 1e-6)
     if g.size(-2) > g.size(-1):
         for a, b, c in polar_express_coeffs[:ns_steps]:
@@ -447,7 +501,7 @@ FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
 
 # Model size
 DEPTH = 8               # number of transformer layers
-DEVICE_BATCH_SIZE = 128  # per-device batch size (reduce if OOM)
+DEVICE_BATCH_SIZE = _default_device_batch_size  # auto-scaled to GPU VRAM; override here if needed
 
 # ---------------------------------------------------------------------------
 # Setup: tokenizer, model, optimizer, dataloader
@@ -458,8 +512,11 @@ torch.manual_seed(42)
 torch.cuda.manual_seed(42)
 torch.set_float32_matmul_precision("high")
 device = torch.device("cuda")
-autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
-H100_BF16_PEAK_FLOPS = 989.5e12
+autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=COMPUTE_DTYPE)
+# GradScaler is only needed for FP16 (avoids underflow); BF16 training is stable without it.
+scaler = torch.amp.GradScaler("cuda") if COMPUTE_DTYPE == torch.float16 else None
+
+print(f"GPU: {GPU_NAME} | VRAM: {GPU_VRAM_GB:.1f} GB | dtype: {COMPUTE_DTYPE} | peak: {GPU_PEAK_FLOPS/1e12:.1f} TFLOPS")
 
 tokenizer = Tokenizer.from_directory()
 vocab_size = tokenizer.get_vocab_size()
@@ -547,7 +604,10 @@ while True:
             loss = model(x, y)
         train_loss = loss.detach()
         loss = loss / grad_accum_steps
-        loss.backward()
+        if scaler is not None:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
         x, y, epoch = next(train_loader)
 
     # Progress and schedules
@@ -560,7 +620,11 @@ while True:
         if group['kind'] == 'muon':
             group["momentum"] = muon_momentum
             group["weight_decay"] = muon_weight_decay
-    optimizer.step()
+    if scaler is not None:
+        scaler.step(optimizer)
+        scaler.update()
+    else:
+        optimizer.step()
     model.zero_grad(set_to_none=True)
 
     train_loss_f = train_loss.item()
@@ -583,7 +647,7 @@ while True:
     debiased_smooth_loss = smooth_train_loss / (1 - ema_beta**(step + 1))
     pct_done = 100 * progress
     tok_per_sec = int(TOTAL_BATCH_SIZE / dt)
-    mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE / dt / H100_BF16_PEAK_FLOPS
+    mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE / dt / GPU_PEAK_FLOPS
     remaining = max(0, TIME_BUDGET - total_training_time)
 
     print(f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt*1000:.0f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.1f}% | epoch: {epoch} | remaining: {remaining:.0f}s    ", end="", flush=True)
@@ -614,7 +678,7 @@ with autocast_ctx:
 # Final summary
 t_end = time.time()
 startup_time = t_start_training - t_start
-steady_state_mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE * (step - 10) / total_training_time / H100_BF16_PEAK_FLOPS if total_training_time > 0 else 0
+steady_state_mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE * (step - 10) / total_training_time / GPU_PEAK_FLOPS if total_training_time > 0 else 0
 peak_vram_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
 
 print("---")
