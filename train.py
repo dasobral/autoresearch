@@ -73,7 +73,7 @@ elif GPU_VRAM_GB >= 35:
     _default_device_batch_size = 64
 elif GPU_VRAM_GB >= 18:
     _default_device_batch_size = 32
-elif GPU_VRAM_GB >= 10:
+elif GPU_VRAM_GB >= 9:
     _default_device_batch_size = 16
 else:
     _default_device_batch_size = 8
