@@ -32,7 +32,14 @@ Each experiment runs on a single GPU. The training script runs for a **fixed tim
 
 **The goal is simple: get the lowest val_bpb.** Since the time budget is fixed, you don't need to worry about training time — it's always 5 minutes. Everything is fair game: change the architecture, the optimizer, the hyperparameters, the batch size, the model size. The only constraint is that the code runs without crashing and finishes within the time budget.
 
-**VRAM** is a soft constraint. Some increase is acceptable for meaningful val_bpb gains, but it should not blow up dramatically.
+**VRAM** is a hard constraint on this machine. This GPU has **10 GB VRAM**. Do not exceed it. Hard limits to respect at all times:
+
+- `DEVICE_BATCH_SIZE` must stay at `_default_device_batch_size` (auto-detected to 16). Do **not** override it with a literal value.
+- `DEPTH` must stay in the range **4–8**. Values above 8 produce models too large for the available VRAM and step budget.
+- `TOTAL_BATCH_SIZE` must remain a power of 2 and satisfy `TOTAL_BATCH_SIZE % (DEVICE_BATCH_SIZE * MAX_SEQ_LEN) == 0`. Reasonable range: `2**15` to `2**18`.
+- `ASPECT_RATIO` must stay in the range **32–96**. Higher values rapidly increase model_dim and VRAM usage.
+
+If a run crashes with a CUDA out-of-memory error, that configuration is too large — log it as `crash`, revert, and move to a smaller or different change.
 
 **Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Conversely, removing something and getting equal or better results is a great outcome — that's a simplification win. When evaluating whether to keep a change, weigh the complexity cost against the improvement magnitude. A 0.001 val_bpb improvement that adds 20 lines of hacky code? Probably not worth it. A 0.001 val_bpb improvement from deleting code? Definitely keep. An improvement of ~0 but much simpler code? Keep.
 

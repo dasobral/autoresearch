@@ -26,15 +26,17 @@ fa3 = get_kernel(repo).flash_attn_interface
 # GPU probe — runs once at import time, sets globals used throughout the file
 # ---------------------------------------------------------------------------
 
-GPU_NAME = torch.cuda.get_device_name(0)
-GPU_VRAM_GB = torch.cuda.get_device_properties(0).total_memory / 1024**3
+_gpu_props = torch.cuda.get_device_properties(0)
+GPU_NAME = _gpu_props.name
+GPU_VRAM_GB = _gpu_props.total_memory / 1024**3
 
 # BF16 Tensor Core support: A100 (sm_80), Ada/RTX40xx (sm_89), Hopper (sm_90),
 # and consumer Ampere (sm_86/87). torch.cuda.is_bf16_supported() covers all of these.
 COMPUTE_DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 
 # Dense (non-sparse) BF16/FP16 Tensor Core peak TFLOPS per GPU family.
-# Used for MFU reporting; longest-prefix match against the device name string.
+# Used for MFU reporting; longest-key match so "RTX 4080 SUPER" beats "RTX 4080"
+# regardless of table order.
 _PEAK_FLOPS_TABLE = [
     ("H100 SXM",       989.5e12),
     ("H100 PCIe",      835e12),
@@ -61,7 +63,7 @@ _PEAK_FLOPS_TABLE = [
     ("RTX 3060 Ti",     32e12),
     ("RTX 3060",        24.5e12),
 ]
-GPU_PEAK_FLOPS = next((v for k, v in _PEAK_FLOPS_TABLE if k in GPU_NAME), 989.5e12)
+GPU_PEAK_FLOPS = max(((len(k), v) for k, v in _PEAK_FLOPS_TABLE if k in GPU_NAME), default=(0, 989.5e12))[1]
 
 # Safe DEVICE_BATCH_SIZE default scaled to available VRAM.
 # Leaves headroom for the agent to increase model depth/width without immediate OOM.
@@ -488,7 +490,7 @@ HEAD_DIM = 128          # target head dimension for attention
 WINDOW_PATTERN = "SSSL" # sliding window pattern: L=full, S=half context
 
 # Optimization
-TOTAL_BATCH_SIZE = 2**19 # ~524K tokens per optimizer step
+TOTAL_BATCH_SIZE = 2**17 # ~131K tokens per optimizer step (2**19 on H100; reduced for RTX 3080 to get ~390 steps/run)
 EMBEDDING_LR = 0.6      # learning rate for token embeddings (Adam)
 UNEMBEDDING_LR = 0.004  # learning rate for lm_head (Adam)
 MATRIX_LR = 0.04        # learning rate for matrix parameters (Muon)
@@ -500,7 +502,7 @@ WARMDOWN_RATIO = 0.5    # fraction of time budget for LR warmdown
 FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
 
 # Model size
-DEPTH = 8               # number of transformer layers
+DEPTH = 6               # number of transformer layers (8 on H100; 6 on RTX 3080 → model_dim=384, ~11M params)
 DEVICE_BATCH_SIZE = _default_device_batch_size  # auto-scaled to GPU VRAM; override here if needed
 
 # ---------------------------------------------------------------------------
